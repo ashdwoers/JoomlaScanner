@@ -5,6 +5,7 @@ A modern Python-based vulnerability scanner for Joomla CMS with automated CVE tr
 ## Features
 
 - **Version Detection** - Automatically detects Joomla version (1.x - 5.x)
+- **Backup/Sensitive File Discovery** - Probes ~190 common backup filenames (`.zip`, `.tar.gz`, `.sql`, `.bak`, config files, logs, VCS artifacts) using HEAD requests — based on the OWASP joomscan wordlist
 - **Component Enumeration** - Finds installed Joomla components
 - **Module Detection** - Detects Joomla modules
 - **CVE Matching** - Matches detected versions against NVD CVE database with fuzzy name normalization
@@ -29,6 +30,8 @@ pip install -r requirements.txt
 
 ### Scan a Target
 
+Provide the **base URL** (apex domain) of the Joomla site — the scanner appends all paths automatically. Do **not** include trailing paths like `/index.php/en`.
+
 ```bash
 # Quick scan (core + CVE-affected + VEL-listed + top popular)
 python cli.py scan https://example.com
@@ -47,6 +50,9 @@ python cli.py scan https://example.com --version-only
 
 # Components/modules only (skip version detection)
 python cli.py scan https://example.com --components-only
+
+# Skip backup/sensitive file discovery
+python cli.py scan https://example.com --skip-backups
 
 # Custom timeout and thread count
 python cli.py scan https://example.com --timeout 5 --threads 20
@@ -100,6 +106,10 @@ JoomlaScanner Report
 Target: https://example.com
 Joomla Version: 3.10.5 (method: xml_file)
 
+Backup/Sensitive Files Found (2):
+  - configuration.php.bak (1.2 KB) — https://example.com/configuration.php.bak
+  - backup.sql.gz (42.1 KB) — https://example.com/backup.sql.gz
+
 Components Found: 12
 
 Vulnerability Summary:
@@ -143,39 +153,20 @@ Component Vulnerabilities (1):
 ```
 
 ### HTML Report
-Professional HTML report with:
-- **Collapsible sections** - All vulnerability sections use `<details>` for easy navigation; sections with findings auto-expand
-- **Compact CVE cards** - Two-column grid layout with severity-colored borders, truncated descriptions
+Clean-looking HTML report:
+- **Collapsible sections** - All vulnerability and discovery sections are collapsible cards (click headers to expand/collapse) for a clean overview
+- **Severity summary cards** - Color-coded top bars on the 5 severity stat cards (Critical/High/Medium/Low/Total)
+- **Backup/Sensitive Files section** - Table of discovered backup files with filename, size, content-type, and URL
+- **Compact CVE cards** - Severity-badged cards with truncated descriptions
 - **Check Manually section** - Components/modules with known CVEs but unconfirmed version ranges
-- **Enumerated listing** - Collapsed-by-default reference table of all detected components and modules with version and status tags
+- **Enumerated listing** - Collapsed-by-default reference table of all detected components and modules with version and status badges
 
 ### JSON Report
 Machine-readable output with structured sections:
+- `backup_files` - Discovered backup and sensitive files (filename, URL, content-type, size, last-modified)
 - `vulnerabilities` - Confirmed core, component, and module CVEs
 - `check_manually` - Potential CVEs (unknown version or no NVD range data)
 - `enumerated` - Full list of all detected components and modules
-
-## Project Structure
-
-```
-JoomlaScanner/
-├── cli.py                       # Main CLI entry point
-├── scanner/
-│   ├── db.py                   # Database operations
-│   ├── fetcher.py              # NVD API integration
-│   ├── detector.py             # Version detection
-│   ├── component.py            # Component & module enumeration
-│   ├── component_scraper.py    # Multi-source component scraper
-│   ├── matcher.py              # CVE matching logic
-│   └── reporter.py             # Report generation
-├── db/
-│   ├── schema.sql              # SQLite schema
-│   └── joomlascan.db           # SQLite database
-├── data/
-│   ├── components.json         # Component database (rich JSON format)
-│   └── modules.json            # Module database
-└── requirements.txt            # Python dependencies
-```
 
 ## Database
 
@@ -209,6 +200,8 @@ The scanner pulls component data from 5 sources:
 
 ## Notes
 
+- The target URL should be the **base domain** (e.g. `https://example.com`), not a subpage — the scanner builds all probe paths from the root
+- Backup file discovery uses HEAD requests to minimize bandwidth; a file is flagged only if the server returns HTTP 200 with a non-HTML Content-Type
 - Default timeout is 3 seconds per request
 - Quick scan (default) checks: core components/modules + CVE-affected + VEL-listed + top popular (popularity >= 10,000). Typically ~700 components and ~300 modules
 - Full scan (`--full`) checks every component and module in the database (~1,300+ components, ~3,600+ modules)
