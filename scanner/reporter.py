@@ -49,6 +49,21 @@ class Reporter:
         pass
 
     @staticmethod
+    def _format_size(size_bytes):
+        """Format a byte count into a human-readable string."""
+        if size_bytes is None:
+            return "unknown size"
+        try:
+            size_bytes = int(size_bytes)
+        except (TypeError, ValueError):
+            return "unknown size"
+        for unit in ("B", "KB", "MB", "GB"):
+            if abs(size_bytes) < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} TB"
+
+    @staticmethod
     def _ensure_output_path(output_file, ext, target_url):
         """Resolve the output path: use given path, or auto-generate inside reports/."""
         if output_file:
@@ -93,7 +108,7 @@ class Reporter:
 
         report = {
             "scanner": "JoomlaScanner",
-            "version": "1.0.0",
+            "version": "1.0.1",
             "scan_date": datetime.now().isoformat(),
             "target": scan_data.get("target_url"),
             "joomla": {
@@ -101,6 +116,7 @@ class Reporter:
                 "detection_method": scan_data.get("joomla_detection_method"),
                 "confidence": scan_data.get("confidence", "unknown"),
             },
+            "backup_files": scan_data.get("backup_files", []),
             "components": scan_data.get("components", []),
             "modules": scan_data.get("modules", []),
             "vulnerabilities": {
@@ -164,6 +180,14 @@ class Reporter:
             )
         else:
             print(f"Joomla Version: {Fore.YELLOW}Unknown{r()}")
+
+        # Backup files
+        backup_files = scan_data.get("backup_files", [])
+        if backup_files:
+            print(f"\n{Fore.RED}Backup/Sensitive Files Found ({len(backup_files)}):{r()}")
+            for bf in backup_files:
+                size = self._format_size(bf.get("content_length"))
+                print(f"  - {bf['filename']} ({size}) — {bf['url']}")
 
         print(f"\nComponents Found: {scan_data.get('total_components', 0)}")
 
@@ -301,42 +325,64 @@ class Reporter:
 
         print("\n" + "=" * 60)
 
+    _SEVERITY_COLORS = {
+        "critical": "#d63939",
+        "high": "#f76707",
+        "medium": "#f59f00",
+        "low": "#2fb344",
+    }
+
+    _SEVERITY_BG = {
+        "critical": "#fbe4e4",
+        "high": "#fff0e6",
+        "medium": "#fff8e1",
+        "low": "#e6f9ed",
+    }
+
+    def _sev_badge(self, severity, score):
+        """Return an inline-styled severity badge."""
+        sev = (severity or "low").lower()
+        color = self._SEVERITY_COLORS.get(sev, "#666")
+        bg = self._SEVERITY_BG.get(sev, "#eee")
+        label = f"{severity or 'N/A'} {score}" if score else (severity or "N/A")
+        return f'<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:.8em;font-weight:600;color:{color};background:{bg};">{label}</span>'
+
     def _build_vuln_html(self, vuln):
-        """Build HTML for a single compact CVE card."""
+        """Build HTML for a single CVE entry."""
         severity = (vuln.get("cvss_severity") or "low").lower()
+        color = self._SEVERITY_COLORS.get(severity, "#666")
         description = vuln.get("description") or "No description"
-        # Truncate long descriptions for the card view
         short_desc = (description[:150] + "...") if len(description) > 150 else description
         fixed = vuln.get("fixed_version")
         fixed_html = f' | Fixed: <strong>{fixed}</strong>' if fixed else ''
-        return f'''<div class="vuln-card vuln-card-{severity}">
-            <div class="vuln-card-header">
-                <span class="vuln-cve">{vuln.get("cve_id")}</span>
-                <span class="badge badge-{severity}">{vuln.get("cvss_severity", "N/A")} {vuln.get("cvss_score", "")}</span>
+        badge = self._sev_badge(vuln.get("cvss_severity"), vuln.get("cvss_score"))
+        return f'''<div style="border:1px solid #e0e0e0;border-radius:4px;padding:8px 12px;margin-bottom:8px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px;">
+                <a href="https://nvd.nist.gov/vuln/detail/{vuln.get("cve_id")}" target="_blank" rel="noopener" style="font-weight:700;color:#1a6dcc;text-decoration:none;">{vuln.get("cve_id")}</a>
+                {badge}
             </div>
-            <div class="vuln-card-desc">{short_desc}</div>
-            <div class="vuln-card-meta">{vuln.get("published_date", "")}{fixed_html}</div>
+            <div style="color:#666;font-size:.85em;margin-top:4px;">{short_desc}</div>
+            <div style="color:#999;font-size:.75em;margin-top:4px;">{vuln.get("published_date", "")}{fixed_html}</div>
         </div>'''
 
     def _build_component_html(self, comp, show_cves=True):
-        """Build HTML for a component/module with its CVEs as compact cards."""
+        """Build HTML for a component/module with its CVEs."""
         cves = comp.get("cves", [])
         cves_html = ""
         if show_cves and cves:
             cards = "".join(self._build_vuln_html(v) for v in cves)
-            cves_html = f'<div class="vuln-grid">{cards}</div>'
-
-        return f'''
-        <div class="component-item">
-            <strong>{comp.get("name")}</strong> (version: {comp.get("version", "unknown")})
-            <span style="color:#888;font-size:0.85em;margin-left:8px;">{len(cves)} CVE{"s" if len(cves) != 1 else ""}</span>
+            cves_html = f'<div style="margin-top:8px;">{cards}</div>'
+        count = len(cves)
+        return f'''<div style="border:1px solid #e0e0e0;border-radius:4px;padding:8px 12px;margin-bottom:8px;">
+            <strong>{comp.get("name")}</strong> <span style="color:#888;">(version: {comp.get("version", "unknown")})</span>
+            <span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:.75em;background:#eee;color:#555;margin-left:6px;">{count} CVE{"s" if count != 1 else ""}</span>
             {cves_html}
         </div>'''
 
     def _build_enum_table_html(self, items, item_type="component"):
-        """Build an HTML table for enumerated components or modules."""
+        """Build a plain HTML table for enumerated components or modules."""
         if not items:
-            return f'<p style="color: #999;">No {item_type}s detected.</p>'
+            return f'<p style="color:#888;">No {item_type}s detected.</p>'
 
         rows = ""
         for item in items:
@@ -346,40 +392,32 @@ class Reporter:
             is_vulnerable = item.get("is_vulnerable", False)
             cve_count = len(item.get("cves", []))
 
-            # Version tag
-            if version == "unknown":
-                ver_html = f'<span class="tag tag-unknown">unknown</span>'
-            else:
-                ver_html = version
+            ver_html = f'<span style="padding:1px 6px;border-radius:3px;font-size:.8em;background:#fff8e1;color:#f59f00;">unknown</span>' if version == "unknown" else version
 
-            # Status tags
             tags = ""
             if is_core:
-                tags += '<span class="tag tag-core">CORE</span> '
+                tags += '<span style="padding:1px 6px;border-radius:3px;font-size:.8em;background:#e0f0ff;color:#1a6dcc;margin-right:4px;">CORE</span>'
             if is_vulnerable:
-                tags += f'<span class="tag tag-vuln">{cve_count} CVE{"s" if cve_count != 1 else ""}</span>'
-            elif not is_vulnerable:
-                tags += '<span class="tag tag-clean">No known CVEs</span>'
+                tags += f'<span style="padding:1px 6px;border-radius:3px;font-size:.8em;background:#fbe4e4;color:#d63939;">{cve_count} CVE{"s" if cve_count != 1 else ""}</span>'
+            else:
+                tags += '<span style="padding:1px 6px;border-radius:3px;font-size:.8em;background:#e6f9ed;color:#2fb344;">No known CVEs</span>'
 
-            rows += f"""
-                <tr>
-                    <td><strong>{name}</strong></td>
-                    <td>{ver_html}</td>
-                    <td>{tags}</td>
+            rows += f"""<tr>
+                    <td style="padding:6px 8px;"><strong>{name}</strong></td>
+                    <td style="padding:6px 8px;">{ver_html}</td>
+                    <td style="padding:6px 8px;">{tags}</td>
                 </tr>"""
 
-        return f"""
-            <table class="enum-table">
-                <thead>
-                    <tr>
-                        <th>Name</th>
-                        <th>Version</th>
-                        <th>Status</th>
-                    </tr>
-                </thead>
-                <tbody>{rows}
-                </tbody>
-            </table>"""
+        return f"""<div style="overflow-x:auto;">
+            <table style="width:100%;border-collapse:collapse;font-size:.9em;">
+                <thead><tr style="border-bottom:2px solid #e0e0e0;text-align:left;">
+                    <th style="padding:6px 8px;">Name</th>
+                    <th style="padding:6px 8px;">Version</th>
+                    <th style="padding:6px 8px;">Status</th>
+                </tr></thead>
+                <tbody>{rows}</tbody>
+            </table>
+        </div>"""
 
     def _generate_html(self, scan_data):
         # Separate confirmed vs potential vulnerabilities for components
@@ -404,7 +442,7 @@ class Reporter:
             v.get("match_type") == "confirmed" for v in m.get("cves", [])
         )]
 
-        # Build core vulns HTML (individual cards, will be wrapped in vuln-grid by template)
+        # Build core vulns HTML
         core_vulns_html = "".join(
             self._build_vuln_html(v)
             for v in scan_data.get("joomla_vulnerabilities", [])
@@ -412,14 +450,12 @@ class Reporter:
 
         # Build confirmed component vulns HTML
         confirmed_comps_html = "".join(
-            self._build_component_html(c)
-            for c in confirmed_comps
+            self._build_component_html(c) for c in confirmed_comps
         )
 
         # Build confirmed module vulns HTML
         confirmed_mods_html = "".join(
-            self._build_component_html(m)
-            for m in confirmed_mods
+            self._build_component_html(m) for m in confirmed_mods
         )
 
         # Build "Check Manually" section
@@ -430,39 +466,81 @@ class Reporter:
             potential_items = ""
             if potential_comps:
                 potential_items += "".join(
-                    self._build_component_html(c)
-                    for c in potential_comps
+                    self._build_component_html(c) for c in potential_comps
                 )
             if potential_mods:
                 potential_items += "".join(
-                    self._build_component_html(m)
-                    for m in potential_mods
+                    self._build_component_html(m) for m in potential_mods
                 )
             check_manually_html = f'''
-        <details class="section section-potential" open>
-            <summary>Check Manually for Potential Vuln/Exploitable <span class="section-count">{n_pot_comps + n_pot_mods} items</span></summary>
-            <div class="section-body">
-                <p class="check-manually-note">The following components/modules were detected with known CVEs reported, but version could not be confirmed — verify manually.</p>
-                {potential_items}
-            </div>
-        </details>'''
+            <details style="margin-top:16px;border:1px solid #e0e0e0;border-radius:6px;">
+                <summary style="padding:12px 16px;cursor:pointer;font-weight:700;font-size:1em;background:#fafafa;border-radius:6px;">
+                    Check Manually for Potential Vuln/Exploitable
+                    <span style="padding:1px 8px;border-radius:3px;font-size:.8em;background:#fff0e6;color:#f76707;margin-left:8px;">{n_pot_comps + n_pot_mods} items</span>
+                </summary>
+                <div style="padding:12px 16px;">
+                    <p style="color:#888;font-style:italic;">The following components/modules were detected with known CVEs reported, but version could not be confirmed — verify manually.</p>
+                    {potential_items}
+                </div>
+            </details>'''
 
-        # Build collapsible "Enumerated Components and Modules" section
+        # Build enumerated components and modules section
         all_components = scan_data.get("components", [])
         all_modules = scan_data.get("modules", [])
         comp_table = self._build_enum_table_html(all_components, "component")
         mod_table = self._build_enum_table_html(all_modules, "module")
 
         enumerated_html = f'''
-        <details class="section section-enum">
-            <summary>Enumerated Components and Modules <span class="section-count">{len(all_components)} components, {len(all_modules)} modules</span></summary>
-            <div class="section-body">
-                <h3>Components ({len(all_components)})</h3>
-                {comp_table}
-                <h3>Modules ({len(all_modules)})</h3>
-                {mod_table}
-            </div>
-        </details>'''
+            <details style="margin-top:16px;border:1px solid #e0e0e0;border-radius:6px;">
+                <summary style="padding:12px 16px;cursor:pointer;font-weight:700;font-size:1em;background:#fafafa;border-radius:6px;">
+                    Enumerated Components and Modules
+                    <span style="padding:1px 8px;border-radius:3px;font-size:.8em;background:#eee;color:#555;margin-left:8px;">{len(all_components)} components, {len(all_modules)} modules</span>
+                </summary>
+                <div style="padding:12px 16px;">
+                    <h4>Components ({len(all_components)})</h4>
+                    {comp_table}
+                    <h4 style="margin-top:16px;">Modules ({len(all_modules)})</h4>
+                    {mod_table}
+                </div>
+            </details>'''
+
+        # Build backup files HTML
+        backup_files = scan_data.get("backup_files", [])
+        backup_html = ""
+        if backup_files:
+            rows = ""
+            for bf in backup_files:
+                size = self._format_size(bf.get("content_length"))
+                ct = bf.get("content_type", "")
+                url = bf.get("url", "")
+                lm = bf.get("last_modified", "")
+                rows += f"""<tr style="border-bottom:1px solid #eee;">
+                        <td style="padding:6px 8px;"><strong>{bf.get("filename", "")}</strong></td>
+                        <td style="padding:6px 8px;">{size}</td>
+                        <td style="padding:6px 8px;word-break:break-all;"><a href="{url}" target="_blank" rel="noopener" style="color:#1a6dcc;text-decoration:none;">{url}</a></td>
+                    </tr>"""
+            backup_html = f'''
+            <details open style="margin-top:16px;border:1px solid #e0e0e0;border-radius:6px;">
+                <summary style="padding:12px 16px;cursor:pointer;font-weight:700;font-size:1em;background:#fafafa;border-radius:6px;">
+                    Backup/Sensitive Files Discovered
+                    <span style="padding:1px 8px;border-radius:3px;font-size:.8em;background:#fbe4e4;color:#d63939;margin-left:8px;">{len(backup_files)} files</span>
+                </summary>
+                <div style="padding:12px 16px;">
+                    <div style="background:#fbe4e4;color:#d63939;padding:10px 14px;border-radius:4px;margin-bottom:12px;font-size:.9em;">
+                        Exposed backup and sensitive files are a security risk. These should be removed or access-restricted immediately.
+                    </div>
+                    <div style="overflow-x:auto;">
+                    <table style="width:100%;border-collapse:collapse;font-size:.9em;">
+                        <thead><tr style="border-bottom:2px solid #e0e0e0;text-align:left;">
+                            <th style="padding:6px 8px;">Filename</th>
+                            <th style="padding:6px 8px;">Size</th>
+                            <th style="padding:6px 8px;">URL</th>
+                        </tr></thead>
+                        <tbody>{rows}</tbody>
+                    </table>
+                    </div>
+                </div>
+            </details>'''
 
         # Count items for section headers
         joomla_vulns_list = scan_data.get("joomla_vulnerabilities", [])
@@ -479,151 +557,118 @@ class Reporter:
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>JoomlaScanner Report - {scan_data.get("target_url")}</title>
     <style>
-        * {{ box-sizing: border-box; }}
-        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }}
-        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-        h1 {{ color: #1a73e8; border-bottom: 2px solid #1a73e8; padding-bottom: 10px; font-size: 1.5em; }}
-        .info-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 15px 0; }}
-        .info-card {{ background: #f8f9fa; padding: 12px; border-radius: 6px; border-left: 4px solid #1a73e8; }}
-        .info-card label {{ font-weight: bold; color: #666; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.3px; }}
-        .info-card value {{ display: block; margin-top: 3px; font-size: 1.05em; color: #333; }}
-        .summary-cards {{ display: flex; gap: 10px; margin: 15px 0; flex-wrap: wrap; }}
-        .summary-card {{ flex: 1; min-width: 100px; padding: 14px 10px; border-radius: 6px; text-align: center; }}
-        .critical {{ background: #ffebee; border: 2px solid #d32f2f; }}
-        .high {{ background: #fff3e0; border: 2px solid #f57c00; }}
-        .medium {{ background: #fff8e1; border: 2px solid #fbc02d; }}
-        .low {{ background: #e8f5e9; border: 2px solid #388e3c; }}
-        .total {{ background: #e3f2fd; border: 2px solid #1976d2; }}
-        .summary-number {{ font-size: 1.6em; font-weight: bold; }}
-        .summary-card > div:last-child {{ font-size: 0.8em; color: #555; }}
-
-        /* Collapsible sections */
-        details.section {{ margin-top: 20px; border: 1px solid #dee2e6; border-radius: 8px; overflow: hidden; }}
-        details.section > summary {{ cursor: pointer; padding: 12px 16px; font-size: 1em; font-weight: bold; user-select: none; display: flex; align-items: center; gap: 8px; }}
-        details.section > summary:hover {{ background: #f1f3f5; }}
-        details.section > summary::marker {{ font-size: 0.8em; }}
-        details.section > .section-body {{ padding: 4px 16px 16px; }}
-        .section-core > summary {{ background: #fff5f5; color: #c62828; border-bottom: 2px solid #ef9a9a; }}
-        .section-comp > summary {{ background: #fff8e1; color: #e65100; border-bottom: 2px solid #ffe082; }}
-        .section-mod > summary {{ background: #e8eaf6; color: #283593; border-bottom: 2px solid #9fa8da; }}
-        .section-potential > summary {{ background: #fff3e0; color: #bf360c; border-bottom: 2px solid #ffcc80; }}
-        .section-enum > summary {{ background: #f8f9fa; color: #495057; border-bottom: 1px solid #dee2e6; }}
-        .section-count {{ font-size: 0.8em; font-weight: normal; color: #888; margin-left: auto; }}
-
-        /* Compact CVE cards in a grid */
-        .vuln-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 10px; margin-top: 8px; }}
-        .vuln-card {{ border: 1px solid #e0e0e0; border-radius: 4px; padding: 8px 10px; font-size: 0.85em; border-left: 3px solid #dc3545; background: #fff; }}
-        .vuln-card-critical {{ border-left-color: #d32f2f; }}
-        .vuln-card-high {{ border-left-color: #f57c00; }}
-        .vuln-card-medium {{ border-left-color: #fbc02d; }}
-        .vuln-card-low {{ border-left-color: #388e3c; }}
-        .vuln-card-header {{ display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-bottom: 4px; }}
-        .vuln-cve {{ font-weight: bold; font-size: 0.9em; color: #333; }}
-        .vuln-card-desc {{ color: #555; font-size: 0.82em; line-height: 1.3; margin-bottom: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }}
-        .vuln-card-meta {{ color: #999; font-size: 0.75em; }}
-        .badge {{ padding: 2px 8px; border-radius: 3px; font-size: 0.72em; font-weight: bold; white-space: nowrap; }}
-        .badge-critical {{ background: #d32f2f; color: white; }}
-        .badge-high {{ background: #f57c00; color: white; }}
-        .badge-medium {{ background: #fbc02d; color: #333; }}
-        .badge-low {{ background: #388e3c; color: white; }}
-        .badge-none {{ background: #9e9e9e; color: white; }}
-
-        /* Component items */
-        .component-item {{ background: #fafafa; padding: 10px 12px; margin: 6px 0; border-radius: 4px; border-left: 3px solid #1976d2; font-size: 0.9em; }}
-
-        /* Check manually note */
-        .check-manually-note {{ color: #666; font-style: italic; margin: 4px 0 10px; font-size: 0.85em; }}
-
-        /* Enum tables */
-        .enum-content h3 {{ color: #495057; margin: 14px 0 6px; font-size: 0.95em; border-bottom: 1px solid #dee2e6; padding-bottom: 4px; }}
-        .enum-table {{ width: 100%; border-collapse: collapse; margin-bottom: 10px; }}
-        .enum-table th {{ background: #e9ecef; text-align: left; padding: 6px 10px; font-size: 0.8em; color: #495057; border-bottom: 2px solid #dee2e6; }}
-        .enum-table td {{ padding: 4px 10px; border-bottom: 1px solid #eee; font-size: 0.85em; }}
-        .enum-table tr:hover {{ background: #f8f9fa; }}
-        .tag {{ display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.72em; font-weight: bold; }}
-        .tag-core {{ background: #e3f2fd; color: #1565c0; }}
-        .tag-vuln {{ background: #ffebee; color: #c62828; }}
-        .tag-clean {{ background: #e8f5e9; color: #2e7d32; }}
-        .tag-unknown {{ background: #fff8e1; color: #f57f17; }}
-        .timestamp {{ color: #999; font-size: 0.8em; text-align: right; margin-top: 20px; }}
-        .none-msg {{ color: #888; font-size: 0.85em; padding: 6px 0; }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #1e293b; background: #f8f9fa; line-height: 1.5; }}
+        a {{ color: #1a6dcc; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        .wrap {{ max-width: 960px; margin: 0 auto; padding: 16px; }}
+        .header {{ background: #1e293b; color: #fff; padding: 20px 16px; margin-bottom: 20px; border-radius: 6px; }}
+        .header small {{ color: #94a3b8; display: block; font-size: .85em; margin-bottom: 4px; }}
+        .header h1 {{ font-size: 1.4em; font-weight: 700; }}
+        .info-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 20px; }}
+        .info-card {{ background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 12px 16px; }}
+        .info-card .label {{ font-size: .75em; text-transform: uppercase; color: #888; letter-spacing: .5px; }}
+        .info-card .value {{ font-size: 1.1em; font-weight: 600; word-break: break-word; }}
+        .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 10px; margin-bottom: 20px; }}
+        .summary-card {{ background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 12px; text-align: center; }}
+        .summary-card .label {{ font-size: .75em; text-transform: uppercase; color: #888; }}
+        .summary-card .num {{ font-size: 1.8em; font-weight: 700; }}
+        .section {{ background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; margin-bottom: 16px; }}
+        .section > details {{ border: none; }}
+        .section > details > summary {{ padding: 12px 16px; cursor: pointer; font-weight: 700; font-size: 1em; }}
+        .section-body {{ padding: 12px 16px; }}
+        .footer {{ text-align: right; color: #888; font-size: .85em; margin-top: 16px; }}
     </style>
 </head>
 <body>
-    <div class="container">
+<div class="wrap">
+    <div class="header">
+        <small>Vulnerability Scan</small>
         <h1>JoomlaScanner Report</h1>
+    </div>
 
-        <div class="info-grid">
-            <div class="info-card">
-                <label>Target URL</label>
-                <value>{scan_data.get("target_url")}</value>
-            </div>
-            <div class="info-card">
-                <label>Joomla Version</label>
-                <value>{scan_data.get("joomla_version", "Unknown")}</value>
-            </div>
-            <div class="info-card">
-                <label>Detection Method</label>
-                <value>{scan_data.get("joomla_detection_method", "N/A")}</value>
-            </div>
-            <div class="info-card">
-                <label>Components Found</label>
-                <value>{scan_data.get("total_components", 0)}</value>
-            </div>
+    <div class="info-grid">
+        <div class="info-card">
+            <div class="label">Target URL</div>
+            <div class="value">{scan_data.get("target_url")}</div>
         </div>
-
-        <div class="summary-cards">
-            <div class="summary-card total">
-                <div class="summary-number">{summary.get("total", 0)}</div>
-                <div>Total</div>
-            </div>
-            <div class="summary-card critical">
-                <div class="summary-number">{summary.get("critical", 0)}</div>
-                <div>Critical</div>
-            </div>
-            <div class="summary-card high">
-                <div class="summary-number">{summary.get("high", 0)}</div>
-                <div>High</div>
-            </div>
-            <div class="summary-card medium">
-                <div class="summary-number">{summary.get("medium", 0)}</div>
-                <div>Medium</div>
-            </div>
-            <div class="summary-card low">
-                <div class="summary-number">{summary.get("low", 0)}</div>
-                <div>Low</div>
-            </div>
+        <div class="info-card">
+            <div class="label">Joomla Version</div>
+            <div class="value">{scan_data.get("joomla_version", "Unknown")}</div>
         </div>
-
-        <details class="section section-core" {"open" if n_core > 0 else ""}>
-            <summary>Joomla Core Vulnerabilities <span class="section-count">{n_core} CVEs</span></summary>
-            <div class="section-body">
-                {"<div class='vuln-grid'>" + core_vulns_html + "</div>" if n_core > 0 else '<p class="none-msg">No core vulnerabilities found.</p>'}
-            </div>
-        </details>
-
-        <details class="section section-comp" {"open" if n_conf_comps > 0 else ""}>
-            <summary>Component Vulnerabilities <span class="section-count">{n_conf_comps} components</span></summary>
-            <div class="section-body">
-                {confirmed_comps_html if n_conf_comps > 0 else '<p class="none-msg">No confirmed component vulnerabilities.</p>'}
-            </div>
-        </details>
-
-        <details class="section section-mod" {"open" if n_conf_mods > 0 else ""}>
-            <summary>Module Vulnerabilities <span class="section-count">{n_conf_mods} modules</span></summary>
-            <div class="section-body">
-                {confirmed_mods_html if n_conf_mods > 0 else '<p class="none-msg">No confirmed module vulnerabilities.</p>'}
-            </div>
-        </details>
-
-        {check_manually_html}
-
-        {enumerated_html}
-
-        <div class="timestamp">
-            Scan completed: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        <div class="info-card">
+            <div class="label">Detection Method</div>
+            <div class="value">{scan_data.get("joomla_detection_method", "N/A")}</div>
+        </div>
+        <div class="info-card">
+            <div class="label">Components Found</div>
+            <div class="value">{scan_data.get("total_components", 0)}</div>
         </div>
     </div>
+
+    <div class="summary-grid">
+        <div class="summary-card">
+            <div class="label">Total</div>
+            <div class="num">{summary.get("total", 0)}</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">Critical</div>
+            <div class="num" style="color:#d63939;">{summary.get("critical", 0)}</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">High</div>
+            <div class="num" style="color:#f76707;">{summary.get("high", 0)}</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">Medium</div>
+            <div class="num" style="color:#f59f00;">{summary.get("medium", 0)}</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">Low</div>
+            <div class="num" style="color:#2fb344;">{summary.get("low", 0)}</div>
+        </div>
+    </div>
+
+    {backup_html}
+
+    <details style="margin-top:16px;border:1px solid #e0e0e0;border-radius:6px;background:#fff;">
+        <summary style="padding:12px 16px;cursor:pointer;font-weight:700;">
+            Joomla Core Vulnerabilities
+            <span style="padding:1px 8px;border-radius:3px;font-size:.8em;background:#fbe4e4;color:#d63939;margin-left:8px;">{n_core} CVEs</span>
+        </summary>
+        <div style="padding:12px 16px;">
+            {core_vulns_html if n_core > 0 else '<p style="color:#888;">No core vulnerabilities found.</p>'}
+        </div>
+    </details>
+
+    <details style="margin-top:16px;border:1px solid #e0e0e0;border-radius:6px;background:#fff;">
+        <summary style="padding:12px 16px;cursor:pointer;font-weight:700;">
+            Component Vulnerabilities
+            <span style="padding:1px 8px;border-radius:3px;font-size:.8em;background:#fff0e6;color:#f76707;margin-left:8px;">{n_conf_comps} components</span>
+        </summary>
+        <div style="padding:12px 16px;">
+            {confirmed_comps_html if n_conf_comps > 0 else '<p style="color:#888;">No confirmed component vulnerabilities.</p>'}
+        </div>
+    </details>
+
+    <details style="margin-top:16px;border:1px solid #e0e0e0;border-radius:6px;background:#fff;">
+        <summary style="padding:12px 16px;cursor:pointer;font-weight:700;">
+            Module Vulnerabilities
+            <span style="padding:1px 8px;border-radius:3px;font-size:.8em;background:#e8eaf6;color:#5c6bc0;margin-left:8px;">{n_conf_mods} modules</span>
+        </summary>
+        <div style="padding:12px 16px;">
+            {confirmed_mods_html if n_conf_mods > 0 else '<p style="color:#888;">No confirmed module vulnerabilities.</p>'}
+        </div>
+    </details>
+
+    {check_manually_html}
+
+    {enumerated_html}
+
+    <div class="footer">
+        Scan completed: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    </div>
+</div>
 </body>
 </html>"""
 
